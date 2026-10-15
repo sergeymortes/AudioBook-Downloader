@@ -39,7 +39,14 @@ def wait_for_process(pid, timeout=60):
     )
 
     if not handle:
-        raise RuntimeError(
+        error_code = ctypes.get_last_error()
+
+        # Процесс уже завершился — ждать больше не нужно.
+        if error_code == 87:
+            return
+
+        raise OSError(
+            error_code,
             "Не удалось получить процесс приложения"
         )
 

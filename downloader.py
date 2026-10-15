@@ -320,6 +320,15 @@ class AudioBookDownloader(ctk.CTk):
         self.update_window = window
         window.title("Обновление AudioBook Downloader")
         window.geometry("470x365")
+        window.update_idletasks()
+
+        width = 470
+        height = 365
+
+        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - height) // 2
+
+        window.geometry(f"{width}x{height}+{x}+{y}")
         window.resizable(False, False)
         window.configure(fg_color=BG)
         window.transient(self)
@@ -693,6 +702,79 @@ class AudioBookDownloader(ctk.CTk):
     def send(self, kind, value):
         self.events.put((kind, value))
 
+    def show_download_complete(self, details):
+        """Показывает результат загрузки и открывает папку книги."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Загрузка завершена")
+        dialog.geometry("490x285")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=BG)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog,
+            text="✓ Аудиокнига скачана!",
+            font=("Segoe UI", 21, "bold"),
+            text_color="#4ADE80"
+        ).pack(pady=(24, 12))
+
+        ctk.CTkLabel(
+            dialog,
+            text=details["title"],
+            font=("Segoe UI", 14, "bold"),
+            text_color=TEXT,
+            wraplength=430
+        ).pack(padx=20, pady=(0, 6))
+
+        ctk.CTkLabel(
+            dialog,
+            text=f"Скачано частей: {details['total']}",
+            text_color=MUTED
+        ).pack(pady=(0, 8))
+
+        ctk.CTkLabel(
+            dialog,
+            text=details["folder"],
+            text_color=MUTED,
+            wraplength=440
+        ).pack(padx=20, pady=(0, 15))
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(fill="x", padx=24, pady=(0, 15))
+
+        def open_book_folder():
+            try:
+                os.startfile(details["folder"])
+            except OSError as error:
+                messagebox.showerror(
+                    "Не удалось открыть папку", str(error), parent=dialog
+                )
+                return
+            dialog.destroy()
+
+        ctk.CTkButton(
+            buttons,
+            text="📁 Открыть папку",
+            fg_color=BLUE,
+            command=open_book_folder,
+            height=42
+        ).pack(side="left", fill="x", expand=True, padx=(0, 7))
+
+        ctk.CTkButton(
+            buttons,
+            text="Закрыть",
+            fg_color="#283852",
+            command=dialog.destroy,
+            height=42
+        ).pack(side="left", fill="x", expand=True, padx=(7, 0))
+
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.focus_force()
+
     def process_events(self):
         try:
             while True:
@@ -755,10 +837,7 @@ class AudioBookDownloader(ctk.CTk):
                         text_color="#4ADE80"
                     )
 
-                    messagebox.showinfo(
-                        "Готово",
-                        value
-                    )
+                    self.show_download_complete(value)
 
                 elif kind == "error":
                     self.downloading = False
@@ -964,9 +1043,11 @@ class AudioBookDownloader(ctk.CTk):
 
             self.send(
                 "done",
-                f"Книга: {title}\n"
-                f"Частей: {total}\n\n"
-                f"Сохранено в:\n{book_folder}"
+                {
+                    "title": title,
+                    "total": total,
+                    "folder": str(book_folder)
+                }
             )
 
         except Exception as error:
