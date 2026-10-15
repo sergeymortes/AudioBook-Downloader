@@ -10,25 +10,70 @@ import time
 from pathlib import Path
 
 
+
 def wait_for_process(pid, timeout=60):
-    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel = ctypes.WinDLL(
+        "kernel32", use_last_error=True
+    )
+
+    kernel.OpenProcess.argtypes = [
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_ulong
+    ]
     kernel.OpenProcess.restype = ctypes.c_void_p
-    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+
+    kernel.WaitForSingleObject.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong
+    ]
     kernel.WaitForSingleObject.restype = ctypes.c_ulong
+
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-    handle = kernel.OpenProcess(0x00100000, False, pid)
+    kernel.CloseHandle.restype = ctypes.c_int
+
+    SYNCHRONIZE = 0x00100000
+    WAIT_OBJECT_0 = 0
+    WAIT_TIMEOUT = 0x00000102
+
+    handle = kernel.OpenProcess(
+        SYNCHRONIZE, False, pid
+    )
+
     if not handle:
-        code = ctypes.get_last_error()
-        if code == 87:  # ERROR_INVALID_PARAMETER: PID already exited
+        error = ctypes.get_last_error()
+
+        if error == 87:
+            # Основной процесс уже завершился.
             return
-        raise OSError(code, 'Не удалось открыть процесс основной программы')
+
+        raise OSError(
+            error,
+            "Не удалось открыть процесс приложения"
+        )
+
     try:
-        result = kernel.WaitForSingleObject(handle, timeout * 1000)
-        if result != 0:
-            raise RuntimeError(f'Ожидание завершения процесса: код {result}')
+        result = kernel.WaitForSingleObject(
+            handle,
+            timeout * 1000
+        )
+
+        if result == WAIT_OBJECT_0:
+            return
+
+        if result == WAIT_TIMEOUT:
+            raise TimeoutError(
+                "Приложение не завершилось за 60 секунд"
+            )
+
+        raise OSError(
+            ctypes.get_last_error(),
+            f"Ошибка ожидания процесса: {result}"
+        )
+
     finally:
         kernel.CloseHandle(handle)
+
 
 
 def backup_path(target, version):
