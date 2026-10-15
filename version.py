@@ -1,5 +1,5 @@
 APP_NAME = "AudioBook Downloader"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.5.0"
 GITHUB_OWNER = "sergeymortes"
 GITHUB_REPO = "AudioBook-Downloader"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"

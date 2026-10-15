@@ -46,8 +46,8 @@ class AudioBookDownloader(ctk.CTk):
         self.title(f"AudioBook Downloader {APP_VERSION}")
 
         # Размер окна
-        window_width = 760
-        window_height = 570
+        window_width = 820
+        window_height = 670
 
         # Получаем разрешение экрана
         screen_width = self.winfo_screenwidth()
@@ -64,6 +64,14 @@ class AudioBookDownloader(ctk.CTk):
         self.resizable(False, False)
 
         self.configure(fg_color=BG)
+
+        # Cleanup a temporary helper left by a previous two-file update.
+        if getattr(sys, "frozen", False):
+            helper = Path(sys.executable).resolve().with_name("AudioBookUpdater.finalizer.exe")
+            try:
+                helper.unlink(missing_ok=True)
+            except OSError:
+                pass  # Helper may still be finishing its own process.
 
         self.events = queue.Queue()
         self.downloading = False
@@ -419,23 +427,33 @@ class AudioBookDownloader(ctk.CTk):
     def update_download_worker(self, update):
         exe = Path(sys.executable).resolve()
         staged = exe.with_name(exe.name + ".update")
+        staged_updater = exe.with_name("AudioBookUpdater.exe.update")
         try:
+            # First verify both downloads. Never start installing a partial release.
             download_update(
                 update, staged,
-                progress=lambda value: self.send("update_progress", value)
+                progress=lambda value: self.send("update_progress", value * 0.5)
+            )
+            self.send("update_status", "Скачивание обновлятора...")
+            download_update(
+                update["updater"], staged_updater,
+                progress=lambda value: self.send("update_progress", 50 + value * 0.5)
             )
             self.send("update_ready", str(staged))
         except Exception as error:
             staged.unlink(missing_ok=True)
+            staged_updater.unlink(missing_ok=True)
             self.send("update_error", str(error))
 
     def launch_updater(self, staged):
         exe = Path(sys.executable).resolve()
         updater = exe.with_name("AudioBookUpdater.exe")
+        staged_updater = exe.with_name("AudioBookUpdater.exe.update")
         try:
             subprocess.Popen(
                 [str(updater), "--pid", str(os.getpid()),
                  "--target", str(exe), "--staged", str(staged),
+                 "--staged-updater", str(staged_updater),
                  "--current-version", APP_VERSION],
                 cwd=str(exe.parent)
             )
@@ -458,27 +476,14 @@ class AudioBookDownloader(ctk.CTk):
             return
         exe = Path(sys.executable).resolve()
         backup_dir = exe.parent / "backups"
-        backups = []
-
-        if backup_dir.exists():
-            backups = list(
-                backup_dir.glob("AudioBookDownloader-v*.exe")
-            )
-
-            legacy_backup = (
-                    backup_dir / "AudioBookDownloader-legacy.exe"
-            )
-
-            if legacy_backup.is_file():
-                backups.append(legacy_backup)
-
-            backups.sort(
-                key=lambda f: f.stat().st_mtime,
-                reverse=True
-            )
+        backups = list(backup_dir.glob("AudioBookDownloader-v*.exe")) if backup_dir.exists() else []
+        legacy = backup_dir / "AudioBookDownloader-legacy.exe"
+        if legacy.is_file():
+            backups.append(legacy)
+        backups.sort(key=lambda f: f.stat().st_mtime, reverse=True)
         dialog = ctk.CTkToplevel(self)
         dialog.title("Предыдущие версии")
-        dialog.geometry("440x250")
+        dialog.geometry("460x260")
         dialog.resizable(False, False)
         dialog.configure(fg_color=BG)
         dialog.transient(self)
@@ -488,15 +493,11 @@ class AudioBookDownloader(ctk.CTk):
             ctk.CTkLabel(dialog, text="Резервных копий пока нет.",
                          text_color=MUTED).pack(pady=18)
         for backup in backups[:2]:
-            if backup.name == "AudioBookDownloader-legacy.exe":
-                version = "legacy"
-                display_version = "Версия не определена"
-            else:
-                version = backup.stem.removeprefix("AudioBookDownloader-v")
-                display_version = f"v{version}"
-            def restore(path=backup, old_version=version):
+            version = "legacy" if backup.name == "AudioBookDownloader-legacy.exe" else backup.stem.removeprefix("AudioBookDownloader-v")
+            label = "Версия не определена" if version == "legacy" else f"v{version}"
+            def restore(path=backup, old_version=version, display=label):
                 if not messagebox.askyesno("Подтвердить откат",
-                    f"Вернуться с {APP_VERSION} на {display_version}?\nПрограмма перезапустится.",
+                    f"Вернуться с {APP_VERSION} на {display}?\nПрограмма перезапустится.",
                     parent=dialog):
                     return
                 updater = exe.with_name("AudioBookUpdater.exe")
@@ -512,7 +513,61 @@ class AudioBookDownloader(ctk.CTk):
                     messagebox.showerror("Ошибка", str(error), parent=dialog)
                     return
                 self.destroy()
-            ctk.CTkButton(dialog, text=f"↩ Вернуться к v{display_version}",
+            ctk.CTkButton(dialog, text=f"↩ Вернуться к {label}",
+                          command=restore, fg_color=BLUE, height=37).pack(fill="x", padx=25, pady=5)
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.lift()
+
+    # -------------------------
+    # Работа с полями ввода
+    # -------------------------
+
+    def show_backups(self):
+        if self.downloading or self.update_busy:
+            messagebox.showwarning("Подождите", "Завершите текущую операцию.")
+            return
+        if not getattr(sys, "frozen", False):
+            messagebox.showinfo("Режим разработки", "Откат доступен в собранном EXE.")
+            return
+        exe = Path(sys.executable).resolve()
+        backup_dir = exe.parent / "backups"
+        backups = sorted(backup_dir.glob("AudioBookDownloader-v*.exe"),
+                         key=lambda f: f.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Предыдущие версии")
+        dialog.geometry("440x250")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=BG)
+        dialog.transient(self)
+        ctk.CTkLabel(dialog, text=f"Текущая версия: {APP_VERSION}",
+                     font=("Segoe UI", 18, "bold"), text_color=TEXT).pack(pady=(18, 12))
+        if not backups:
+            ctk.CTkLabel(dialog, text="Резервных копий пока нет.",
+                         text_color=MUTED).pack(pady=18)
+        for backup in backups[:2]:
+            version = backup.stem.removeprefix("AudioBookDownloader-v")
+            def restore(path=backup, old_version=version):
+                if not messagebox.askyesno("Подтвердить откат",
+                    f"Вернуться с {APP_VERSION} на {old_version}?\nПрограмма перезапустится.",
+                    parent=dialog):
+                    return
+                updater = exe.with_name("AudioBookUpdater.exe")
+                if not updater.is_file():
+                    messagebox.showerror("Ошибка", "AudioBookUpdater.exe не найден", parent=dialog)
+                    return
+                try:
+                    subprocess.Popen([str(updater), "--pid", str(os.getpid()),
+                                      "--target", str(exe), "--restore", str(path),
+                                      "--current-version", APP_VERSION,
+                                      "--restore-version", old_version], cwd=str(exe.parent))
+                except OSError as error:
+                    messagebox.showerror("Ошибка", str(error), parent=dialog)
+                    return
+                self.destroy()
+            ctk.CTkButton(dialog, text=f"↩ Вернуться к v{version}",
                           command=restore, fg_color=BLUE, height=37).pack(fill="x", padx=25, pady=5)
         dialog.update_idletasks()
         x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
@@ -867,6 +922,10 @@ class AudioBookDownloader(ctk.CTk):
 
                 if kind == "update_available":
                     self.show_update_dialog(value)
+
+                elif kind == "update_status":
+                    if self.update_status is not None:
+                        self.update_status.configure(text=value)
 
                 elif kind == "update_progress":
                     if self.update_progress is not None:

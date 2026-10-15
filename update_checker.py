@@ -4,13 +4,27 @@ from urllib.parse import urlparse
 
 import requests
 from packaging.version import Version
-
 from version import APP_VERSION, GITHUB_API, EXE_NAME, GITHUB_OWNER, GITHUB_REPO
 
 HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "AudioBookDownloader-Updater",
 }
+UPDATER_NAME = "AudioBookUpdater.exe"
+
+
+def _asset(release, name):
+    asset = next((a for a in release.get("assets", []) if a.get("name") == name), None)
+    if not asset:
+        raise RuntimeError(f"В релизе отсутствует {name}")
+    digest = asset.get("digest") or ""
+    if not digest.startswith("sha256:") or len(digest.split(":", 1)[1]) != 64:
+        raise RuntimeError(f"GitHub не вернул SHA-256 для {name}")
+    return {
+        "name": name,
+        "download_url": asset["browser_download_url"],
+        "sha256": digest.split(":", 1)[1],
+    }
 
 
 def check_for_updates():
@@ -22,28 +36,26 @@ def check_for_updates():
     latest = release["tag_name"].lstrip("vV")
     if Version(latest) <= Version(APP_VERSION):
         return None
-    asset = next((a for a in release.get("assets", []) if a.get("name") == EXE_NAME), None)
-    if asset is None:
-        raise RuntimeError(f"В релизе {latest} отсутствует {EXE_NAME}")
-    digest = asset.get("digest") or ""
-    if not digest.startswith("sha256:"):
-        raise RuntimeError("GitHub не вернул SHA-256 для EXE; обновление отменено")
+    main = _asset(release, EXE_NAME)
     return {
         "version": latest,
         "description": release.get("body") or "",
-        "download_url": asset["browser_download_url"],
-        "sha256": digest.split(":", 1)[1],
+        **main,
+        "updater": _asset(release, UPDATER_NAME),
     }
 
 
 def download_update(update, destination, progress=None):
     destination = Path(destination)
+    name = update["name"]
+    if name not in (EXE_NAME, UPDATER_NAME):
+        raise RuntimeError("Неизвестный файл обновления")
     url = update["download_url"]
     parsed = urlparse(url)
-    expected_prefix = f"/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/"
+    prefix = f"/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/"
     if (parsed.scheme != "https" or parsed.hostname != "github.com"
-            or not parsed.path.startswith(expected_prefix)
-            or not parsed.path.endswith("/" + EXE_NAME)):
+            or not parsed.path.startswith(prefix)
+            or not parsed.path.endswith("/" + name)):
         raise RuntimeError("Недопустимый URL обновления")
 
     digest = hashlib.sha256()
