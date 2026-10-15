@@ -458,8 +458,24 @@ class AudioBookDownloader(ctk.CTk):
             return
         exe = Path(sys.executable).resolve()
         backup_dir = exe.parent / "backups"
-        backups = sorted(backup_dir.glob("AudioBookDownloader-v*.exe"),
-                         key=lambda f: f.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+        backups = []
+
+        if backup_dir.exists():
+            backups = list(
+                backup_dir.glob("AudioBookDownloader-v*.exe")
+            )
+
+            legacy_backup = (
+                    backup_dir / "AudioBookDownloader-legacy.exe"
+            )
+
+            if legacy_backup.is_file():
+                backups.append(legacy_backup)
+
+            backups.sort(
+                key=lambda f: f.stat().st_mtime,
+                reverse=True
+            )
         dialog = ctk.CTkToplevel(self)
         dialog.title("Предыдущие версии")
         dialog.geometry("440x250")
@@ -472,10 +488,15 @@ class AudioBookDownloader(ctk.CTk):
             ctk.CTkLabel(dialog, text="Резервных копий пока нет.",
                          text_color=MUTED).pack(pady=18)
         for backup in backups[:2]:
-            version = backup.stem.removeprefix("AudioBookDownloader-v")
+            if backup.name == "AudioBookDownloader-legacy.exe":
+                version = "legacy"
+                display_version = "Версия не определена"
+            else:
+                version = backup.stem.removeprefix("AudioBookDownloader-v")
+                display_version = f"v{version}"
             def restore(path=backup, old_version=version):
                 if not messagebox.askyesno("Подтвердить откат",
-                    f"Вернуться с {APP_VERSION} на {old_version}?\nПрограмма перезапустится.",
+                    f"Вернуться с {APP_VERSION} на {display_version}?\nПрограмма перезапустится.",
                     parent=dialog):
                     return
                 updater = exe.with_name("AudioBookUpdater.exe")
@@ -491,7 +512,7 @@ class AudioBookDownloader(ctk.CTk):
                     messagebox.showerror("Ошибка", str(error), parent=dialog)
                     return
                 self.destroy()
-            ctk.CTkButton(dialog, text=f"↩ Вернуться к v{version}",
+            ctk.CTkButton(dialog, text=f"↩ Вернуться к v{display_version}",
                           command=restore, fg_color=BLUE, height=37).pack(fill="x", padx=25, pady=5)
         dialog.update_idletasks()
         x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2

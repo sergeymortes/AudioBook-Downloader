@@ -77,16 +77,32 @@ def wait_for_process(pid, timeout=60):
 
 
 def backup_path(target, version):
-    if not version or any(ch not in '0123456789.' for ch in version):
-        raise ValueError('Недопустимый номер версии')
-    return target.parent / 'backups' / f'AudioBookDownloader-v{version}.exe'
+    folder = target.parent / "backups"
+
+    if version is None or version == "legacy":
+        return folder / "AudioBookDownloader-legacy.exe"
+
+    if not version or any(ch not in "0123456789." for ch in version):
+        raise ValueError("Недопустимый номер версии")
+
+    return folder / f"AudioBookDownloader-v{version}.exe"
 
 
 def trim_backups(folder):
-    copies = sorted(folder.glob('AudioBookDownloader-v*.exe'),
-                    key=lambda p: p.stat().st_mtime, reverse=True)
+    copies = list(folder.glob("AudioBookDownloader-v*.exe"))
+
+    legacy = folder / "AudioBookDownloader-legacy.exe"
+    if legacy.is_file():
+        copies.append(legacy)
+
+    copies.sort(
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+
     for old in copies[2:]:
         old.unlink()
+
 
 
 def update_state(ignore_version):
@@ -138,28 +154,58 @@ def replace_exe(pid, target, source, current_version, restoring=False, restore_v
 
 
 def main():
-    (Path.home() / "AudioBookUpdater-debug.log").write_text(
-        f"UPDATER TEST 1.3.0\n"
-        f"Executable: {sys.executable}\n"
-        f"Arguments: {sys.argv}\n",
-        encoding="utf-8"
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--pid",
+        type=int,
+        required=True
+    )
+    parser.add_argument(
+        "--target",
+        required=True
     )
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--pid', type=int, required=True)
-    parser.add_argument('--target', required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--staged')
-    mode.add_argument('--restore')
-    parser.add_argument('--current-version', default='1.2.0')
-    parser.add_argument('--restore-version')
+    mode.add_argument("--staged")
+    mode.add_argument("--restore")
+
+    # Новые версии передают номер.
+    # Старые версии могут его не передавать.
+    parser.add_argument(
+        "--current-version",
+        default=None
+    )
+    parser.add_argument(
+        "--restore-version"
+    )
+
     args = parser.parse_args()
+
+    if args.pid <= 0:
+        parser.error("Некорректный PID")
+
     if args.restore and not args.restore_version:
-        parser.error('--restore-version обязателен при откате')
+        parser.error(
+            "--restore-version обязателен при откате"
+        )
+
+    if args.restore and not args.current_version:
+        parser.error(
+            "Для отката требуется --current-version"
+        )
+
     time.sleep(0.5)
-    replace_exe(args.pid, args.target, args.restore or args.staged,
-                args.current_version, restoring=bool(args.restore),
-                restore_version=args.restore_version)
+
+    replace_exe(
+        pid=args.pid,
+        target=args.target,
+        source=args.restore or args.staged,
+        current_version=args.current_version,
+        restoring=bool(args.restore),
+        restore_version=args.restore_version
+    )
+
 
 
 if __name__ == '__main__':
