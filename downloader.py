@@ -1,14 +1,21 @@
-
+import os
+import sys
+import subprocess
 import re
 import queue
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
-
 import requests
 from bs4 import BeautifulSoup
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+
+from version import APP_VERSION, EXE_NAME
+from update_checker import (
+    check_for_updates,
+    download_update
+)
 
 # Настройки внешнего вида
 ctk.set_appearance_mode("dark")
@@ -27,7 +34,7 @@ class AudioBookDownloader(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("AudioBook Downloader 1.0")
+        self.title(f"AudioBook Downloader {APP_VERSION}")
 
         # Размер окна
         window_width = 760
@@ -51,6 +58,11 @@ class AudioBookDownloader(ctk.CTk):
 
         self.events = queue.Queue()
         self.downloading = False
+        self.update_window = None
+        self.update_progress = None
+        self.update_status = None
+        self.update_button = None
+        self.update_busy = False
 
         self.url_var = ctk.StringVar()
         self.folder_var = ctk.StringVar(
@@ -59,6 +71,8 @@ class AudioBookDownloader(ctk.CTk):
 
         self.build_ui()
         self.after(100, self.process_events)
+
+        self.after(2000, self.start_update_check)
 
     def build_ui(self):
 
@@ -277,10 +291,138 @@ class AudioBookDownloader(ctk.CTk):
         # Нижняя подпись
         ctk.CTkLabel(
             self,
-            text="AudioBook Downloader • Version 2.0",
+            text=f"AudioBook Downloader • Version {APP_VERSION}",
             font=("Segoe UI", 11),
             text_color="#64748B"
         ).pack(pady=(0, 12))
+
+    # -------------------------
+    # Обновления приложения
+    # -------------------------
+
+    def start_update_check(self):
+        threading.Thread(target=self.update_check_worker, daemon=True).start()
+
+    def update_check_worker(self):
+        try:
+            update = check_for_updates()
+            if update:
+                self.send("update_available", update)
+        except Exception as error:
+            # Ошибка сети не должна мешать скачиванию книг.
+            print(f"Проверка обновлений: {error}")
+
+    def show_update_dialog(self, update):
+        if self.update_window is not None and self.update_window.winfo_exists():
+            return
+
+        window = ctk.CTkToplevel(self)
+        self.update_window = window
+        window.title("Обновление AudioBook Downloader")
+        window.geometry("470x365")
+        window.resizable(False, False)
+        window.configure(fg_color=BG)
+        window.transient(self)
+
+        def close_dialog():
+            if self.update_busy:
+                return
+            window.destroy()
+            self.update_window = None
+
+        window.protocol("WM_DELETE_WINDOW", close_dialog)
+
+        ctk.CTkLabel(
+            window, text="Доступно обновление",
+            font=("Segoe UI", 21, "bold"), text_color=TEXT
+        ).pack(pady=(22, 8))
+
+        ctk.CTkLabel(
+            window,
+            text=f"Текущая версия: {APP_VERSION}    Новая: {update['version']}",
+            text_color=MUTED
+        ).pack(pady=(0, 10))
+
+        notes = ctk.CTkTextbox(window, height=120, fg_color=CARD, wrap="word")
+        notes.pack(fill="x", padx=25)
+        notes.insert("1.0", update.get("description") or "Доступна новая версия программы.")
+        notes.configure(state="disabled")
+
+        self.update_progress = ctk.CTkProgressBar(window, progress_color=BLUE)
+        self.update_progress.pack(fill="x", padx=25, pady=(15, 6))
+        self.update_progress.set(0)
+
+        self.update_status = ctk.CTkLabel(
+            window, text="Ожидание подтверждения", text_color=MUTED
+        )
+        self.update_status.pack()
+
+        def begin_update():
+            if self.update_busy:
+                return
+            if self.downloading:
+                messagebox.showwarning(
+                    "Подождите", "Сначала дождитесь окончания скачивания книги.",
+                    parent=window
+                )
+                return
+            if not getattr(sys, "frozen", False):
+                messagebox.showinfo(
+                    "Режим разработки",
+                    "Автоустановка работает только в собранной EXE-версии.",
+                    parent=window
+                )
+                return
+            updater = Path(sys.executable).resolve().with_name("AudioBookUpdater.exe")
+            if not updater.is_file():
+                messagebox.showerror(
+                    "Обновлятор не найден",
+                    "Положите AudioBookUpdater.exe рядом с AudioBookDownloader.exe.",
+                    parent=window
+                )
+                return
+            self.update_busy = True
+            self.update_button.configure(state="disabled", text="Скачивание...")
+            self.update_status.configure(text="Скачивание обновления...")
+            threading.Thread(
+                target=self.update_download_worker,
+                args=(update,), daemon=True
+            ).start()
+
+        self.update_button = ctk.CTkButton(
+            window, text="Скачать и установить", command=begin_update,
+            fg_color=BLUE, height=40
+        )
+        self.update_button.pack(fill="x", padx=25, pady=(12, 12))
+        window.lift()
+
+    def update_download_worker(self, update):
+        exe = Path(sys.executable).resolve()
+        staged = exe.with_name(exe.name + ".update")
+        try:
+            download_update(
+                update, staged,
+                progress=lambda value: self.send("update_progress", value)
+            )
+            self.send("update_ready", str(staged))
+        except Exception as error:
+            staged.unlink(missing_ok=True)
+            self.send("update_error", str(error))
+
+    def launch_updater(self, staged):
+        exe = Path(sys.executable).resolve()
+        updater = exe.with_name("AudioBookUpdater.exe")
+        try:
+            subprocess.Popen(
+                [str(updater), "--pid", str(os.getpid()),
+                 "--target", str(exe), "--staged", str(staged)],
+                cwd=str(exe.parent)
+            )
+        except Exception as error:
+            self.update_busy = False
+            self.send("update_error", f"Не удалось запустить обновлятор: {error}")
+            return
+        self.destroy()
 
     # -------------------------
     # Работа с полями ввода
@@ -558,7 +700,31 @@ class AudioBookDownloader(ctk.CTk):
                     self.events.get_nowait()
                 )
 
-                if kind == "status":
+                if kind == "update_available":
+                    self.show_update_dialog(value)
+
+                elif kind == "update_progress":
+                    if self.update_progress is not None:
+                        self.update_progress.set(value / 100)
+                    if self.update_status is not None:
+                        self.update_status.configure(text=f"Скачивание: {value:.0f}%")
+
+                elif kind == "update_ready":
+                    if self.downloading:
+                        self.update_busy = False
+                        self.send("update_error", "Дождитесь окончания загрузки книги и повторите обновление.")
+                    else:
+                        self.launch_updater(value)
+
+                elif kind == "update_error":
+                    self.update_busy = False
+                    if self.update_button is not None:
+                        self.update_button.configure(state="normal", text="Повторить обновление")
+                    if self.update_status is not None:
+                        self.update_status.configure(text="Ошибка обновления")
+                    messagebox.showerror("Ошибка обновления", value)
+
+                elif kind == "status":
                     self.status_label.configure(
                         text=value
                     )
