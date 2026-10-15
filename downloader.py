@@ -4,6 +4,7 @@ import subprocess
 import re
 import queue
 import threading
+import json
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
@@ -27,6 +28,14 @@ INPUT = "#202C40"
 BLUE = "#397DFA"
 TEXT = "#F1F5F9"
 MUTED = "#94A3B8"
+
+
+def read_update_state():
+    state_path = Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "AudioBookDownloader" / "update_state.json"
+    try:
+        return json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 
 
 class AudioBookDownloader(ctk.CTk):
@@ -97,6 +106,11 @@ class AudioBookDownloader(ctk.CTk):
             font=("Segoe UI", 13),
             text_color=MUTED
         ).pack(anchor="w", pady=(5, 0))
+
+        ctk.CTkButton(
+            header, text="↩ Предыдущие версии", width=165, height=30,
+            fg_color="#283852", command=self.show_backups
+        ).pack(anchor="e", pady=(0, 0))
 
         # Основная карточка
         card = ctk.CTkFrame(
@@ -307,7 +321,9 @@ class AudioBookDownloader(ctk.CTk):
         try:
             update = check_for_updates()
             if update:
-                self.send("update_available", update)
+                state = read_update_state()
+                if update["version"] != state.get("ignored_version"):
+                    self.send("update_available", update)
         except Exception as error:
             # Ошибка сети не должна мешать скачиванию книг.
             print(f"Проверка обновлений: {error}")
@@ -320,15 +336,6 @@ class AudioBookDownloader(ctk.CTk):
         self.update_window = window
         window.title("Обновление AudioBook Downloader")
         window.geometry("470x365")
-        window.update_idletasks()
-
-        width = 470
-        height = 365
-
-        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - height) // 2
-
-        window.geometry(f"{width}x{height}+{x}+{y}")
         window.resizable(False, False)
         window.configure(fg_color=BG)
         window.transient(self)
@@ -403,6 +410,10 @@ class AudioBookDownloader(ctk.CTk):
             fg_color=BLUE, height=40
         )
         self.update_button.pack(fill="x", padx=25, pady=(12, 12))
+        window.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - window.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - window.winfo_height()) // 2
+        window.geometry(f"+{x}+{y}")
         window.lift()
 
     def update_download_worker(self, update):
@@ -424,7 +435,8 @@ class AudioBookDownloader(ctk.CTk):
         try:
             subprocess.Popen(
                 [str(updater), "--pid", str(os.getpid()),
-                 "--target", str(exe), "--staged", str(staged)],
+                 "--target", str(exe), "--staged", str(staged),
+                 "--current-version", APP_VERSION],
                 cwd=str(exe.parent)
             )
         except Exception as error:
@@ -436,6 +448,56 @@ class AudioBookDownloader(ctk.CTk):
     # -------------------------
     # Работа с полями ввода
     # -------------------------
+
+    def show_backups(self):
+        if self.downloading or self.update_busy:
+            messagebox.showwarning("Подождите", "Завершите текущую операцию.")
+            return
+        if not getattr(sys, "frozen", False):
+            messagebox.showinfo("Режим разработки", "Откат доступен в собранном EXE.")
+            return
+        exe = Path(sys.executable).resolve()
+        backup_dir = exe.parent / "backups"
+        backups = sorted(backup_dir.glob("AudioBookDownloader-v*.exe"),
+                         key=lambda f: f.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Предыдущие версии")
+        dialog.geometry("440x250")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=BG)
+        dialog.transient(self)
+        ctk.CTkLabel(dialog, text=f"Текущая версия: {APP_VERSION}",
+                     font=("Segoe UI", 18, "bold"), text_color=TEXT).pack(pady=(18, 12))
+        if not backups:
+            ctk.CTkLabel(dialog, text="Резервных копий пока нет.",
+                         text_color=MUTED).pack(pady=18)
+        for backup in backups[:2]:
+            version = backup.stem.removeprefix("AudioBookDownloader-v")
+            def restore(path=backup, old_version=version):
+                if not messagebox.askyesno("Подтвердить откат",
+                    f"Вернуться с {APP_VERSION} на {old_version}?\nПрограмма перезапустится.",
+                    parent=dialog):
+                    return
+                updater = exe.with_name("AudioBookUpdater.exe")
+                if not updater.is_file():
+                    messagebox.showerror("Ошибка", "AudioBookUpdater.exe не найден", parent=dialog)
+                    return
+                try:
+                    subprocess.Popen([str(updater), "--pid", str(os.getpid()),
+                                      "--target", str(exe), "--restore", str(path),
+                                      "--current-version", APP_VERSION,
+                                      "--restore-version", old_version], cwd=str(exe.parent))
+                except OSError as error:
+                    messagebox.showerror("Ошибка", str(error), parent=dialog)
+                    return
+                self.destroy()
+            ctk.CTkButton(dialog, text=f"↩ Вернуться к v{version}",
+                          command=restore, fg_color=BLUE, height=37).pack(fill="x", padx=25, pady=5)
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.lift()
 
     def clear_url(self):
         self.url_var.set("")

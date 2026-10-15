@@ -1,6 +1,7 @@
-
+"""Standalone Windows updater and rollback helper."""
 import argparse
 import ctypes
+import json
 import os
 import shutil
 import subprocess
@@ -10,136 +11,109 @@ from pathlib import Path
 
 
 def wait_for_process(pid, timeout=60):
-    SYNCHRONIZE = 0x00100000
-    WAIT_TIMEOUT = 0x00000102
-
-    kernel32 = ctypes.WinDLL(
-        "kernel32", use_last_error=True
-    )
-
-    kernel32.OpenProcess.argtypes = [
-        ctypes.c_ulong,
-        ctypes.c_int,
-        ctypes.c_ulong
-    ]
-    kernel32.OpenProcess.restype = ctypes.c_void_p
-
-    kernel32.WaitForSingleObject.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_ulong
-    ]
-    kernel32.WaitForSingleObject.restype = ctypes.c_ulong
-
-    kernel32.CloseHandle.argtypes = [
-        ctypes.c_void_p
-    ]
-
-    handle = kernel32.OpenProcess(
-        SYNCHRONIZE, False, pid
-    )
-
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel.WaitForSingleObject.restype = ctypes.c_ulong
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel.OpenProcess(0x00100000, False, pid)
     if not handle:
-        error_code = ctypes.get_last_error()
-
-        # Процесс уже завершился — ждать больше не нужно.
-        if error_code == 87:
+        code = ctypes.get_last_error()
+        if code == 87:  # ERROR_INVALID_PARAMETER: PID already exited
             return
-
-        raise OSError(
-            error_code,
-            "Не удалось получить процесс приложения"
-        )
-
+        raise OSError(code, 'Не удалось открыть процесс основной программы')
     try:
-        result = kernel32.WaitForSingleObject(
-            handle, timeout * 1000
-        )
-        if result == WAIT_TIMEOUT:
-            raise TimeoutError(
-                "Программа не закрылась за 60 секунд"
-            )
+        result = kernel.WaitForSingleObject(handle, timeout * 1000)
         if result != 0:
-            raise RuntimeError(
-                "Ошибка ожидания завершения программы"
-            )
+            raise RuntimeError(f'Ожидание завершения процесса: код {result}')
     finally:
-        kernel32.CloseHandle(handle)
+        kernel.CloseHandle(handle)
 
 
-def install_update(pid, target, staged):
+def backup_path(target, version):
+    if not version or any(ch not in '0123456789.' for ch in version):
+        raise ValueError('Недопустимый номер версии')
+    return target.parent / 'backups' / f'AudioBookDownloader-v{version}.exe'
+
+
+def trim_backups(folder):
+    copies = sorted(folder.glob('AudioBookDownloader-v*.exe'),
+                    key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in copies[2:]:
+        old.unlink()
+
+
+def update_state(ignore_version):
+    folder = Path(os.getenv('LOCALAPPDATA', str(Path.home()))) / 'AudioBookDownloader'
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / 'update_state.json'
+    temporary = folder / 'update_state.json.tmp'
+    temporary.write_text(json.dumps({'ignored_version': ignore_version}), encoding='utf-8')
+    os.replace(temporary, dest)
+
+
+def replace_exe(pid, target, source, current_version, restoring=False, restore_version=None):
     target = Path(target).resolve()
-    staged = Path(staged).resolve()
-
-    if not target.is_file():
-        raise FileNotFoundError(target)
-
-    if not staged.is_file():
-        raise FileNotFoundError(staged)
-
-    if target.parent != staged.parent:
-        raise RuntimeError(
-            "Обновление должно находиться рядом с EXE"
-        )
-
-    if staged.name != target.name + ".update":
-        raise RuntimeError(
-            "Неверное имя файла обновления"
-        )
+    source = Path(source).resolve()
+    if target.name != 'AudioBookDownloader.exe' or not target.is_file() or not source.is_file():
+        raise RuntimeError('Не найден основной EXE или файл обновления')
+    if restoring:
+        if source != backup_path(target, restore_version).resolve():
+            raise RuntimeError('Некорректный путь резервной копии')
+    elif source != target.with_name(target.name + '.update'):
+        raise RuntimeError('Некорректный путь обновления')
 
     wait_for_process(pid)
-
-    backup = target.with_name(
-        target.name + ".backup"
-    )
-
-    shutil.copy2(target, backup)
-
+    folder = target.parent / 'backups'
+    folder.mkdir(exist_ok=True)
+    old_backup = backup_path(target, current_version)
+    # Copy new bytes to a temporary file on the same disk, so os.replace is atomic.
+    prepared = target.with_name(target.name + '.installing')
+    shutil.copy2(source, prepared)
+    shutil.copy2(target, old_backup)
     try:
-        # Замена внутри одного диска.
-        os.replace(staged, target)
-
-        subprocess.Popen(
-            [str(target)],
-            cwd=str(target.parent)
-        )
-
+        os.replace(prepared, target)
+        if restoring:
+            # Don't immediately prompt to reinstall the version just rolled back from.
+            update_state(current_version)
+        else:
+            update_state(None)
+        subprocess.Popen([str(target)], cwd=str(target.parent))
     except Exception:
-        # Восстанавливаем предыдущую версию.
-        os.replace(backup, target)
+        # Restore the previous EXE if replacement or launch fails.
+        shutil.copy2(old_backup, target)
         raise
-
-    else:
-        # Оставляем backup для ручного восстановления,
-        # если новая программа запустится, но не заработает.
-        pass
+    finally:
+        prepared.unlink(missing_ok=True)
+    if not restoring:
+        source.unlink(missing_ok=True)
+    # Preserve the restored version's backup until after cleanup; newest two remain.
+    trim_backups(folder)
 
 
 def main():
     parser = argparse.ArgumentParser()
-
-    parser.add_argument("--pid", type=int, required=True)
-    parser.add_argument("--target", required=True)
-    parser.add_argument("--staged", required=True)
-
+    parser.add_argument('--pid', type=int, required=True)
+    parser.add_argument('--target', required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--staged')
+    mode.add_argument('--restore')
+    parser.add_argument('--current-version', required=True)
+    parser.add_argument('--restore-version')
     args = parser.parse_args()
-
-    # Даем основному приложению время закрыться.
-    time.sleep(1)
-
-    install_update(
-        args.pid,
-        args.target,
-        args.staged
-    )
+    if args.restore and not args.restore_version:
+        parser.error('--restore-version обязателен при откате')
+    time.sleep(0.5)
+    replace_exe(args.pid, args.target, args.restore or args.staged,
+                args.current_version, restoring=bool(args.restore),
+                restore_version=args.restore_version)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         main()
-    except Exception as error:
-        log = Path.home() / "AudioBookUpdater-error.log"
-        log.write_text(
-            str(error),
-            encoding="utf-8"
-        )
+    except Exception as exc:
+        (Path.home() / 'AudioBookUpdater-error.log').write_text(
+            f'{type(exc).__name__}: {exc}', encoding='utf-8')
         sys.exit(1)
