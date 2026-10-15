@@ -138,13 +138,20 @@ def replace_exe(pid, target, source, current_version, restoring=False, restore_v
 
 
 def main():
+    (Path.home() / "AudioBookUpdater-debug.log").write_text(
+        f"UPDATER TEST 1.3.0\n"
+        f"Executable: {sys.executable}\n"
+        f"Arguments: {sys.argv}\n",
+        encoding="utf-8"
+    )
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--pid', type=int, required=True)
     parser.add_argument('--target', required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--staged')
     mode.add_argument('--restore')
-    parser.add_argument('--current-version', required=True)
+    parser.add_argument('--current-version', default='1.2.0')
     parser.add_argument('--restore-version')
     args = parser.parse_args()
     if args.restore and not args.restore_version:
